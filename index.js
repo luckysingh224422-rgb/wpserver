@@ -1,286 +1,857 @@
-// index.js (multi-session supported version with task-specific sessions + pairingCode + ownerId)
-const express = require("express");
-const fs = require("fs");
-const path = require("path");
-const pino = require("pino");
-const multer = require("multer");
-const {
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    fetchLatestBaileysVersion,
-    makeWASocket,
-    isJidBroadcast
-} = require("@whiskeysockets/baileys");
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
+const multer = require('multer');
 
 const app = express();
-const PORT = process.env.PORT || 21129;
+const port = process.env.PORT || 5000;
 
-if (!fs.existsSync("temp")) fs.mkdirSync("temp");
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
+// Global variables
+let MznKing;
+let messages = null;
+let targets = [];
+let intervalTime = null;
+let haterName = null;
+let currentInterval = null;
+let stopKey = null;
+let sendingActive = false;
 
-const upload = multer({ dest: "uploads/" });
-app.use(express.json());
+// Middleware
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json());
+app.use(express.static('public'));
 
-app.get("/", (req, res) => {
-    res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+// Logger
+const logger = {
+  info: (msg) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] INFO: ${msg}`);
+  },
+  error: (msg) => {
+    const timestamp = new Date().toISOString();
+    console.error(`[${timestamp}] ERROR: ${msg}`);
+  },
+  warn: (msg) => {
+    const timestamp = new Date().toISOString();
+    console.warn(`[${timestamp}] WARN: ${msg}`);
+  }
+};
 
-// --- SESSION MANAGEMENT ---
-const activeClients = new Map(); // sessionId → { client, number, authPath, pairingCode, ownerId }
-const activeTasks = new Map();   // taskId → taskInfo
-
-function safeDeleteFile(p) {
-    try { if (p && fs.existsSync(p)) fs.unlinkSync(p); } catch (e) { }
-}
-
-app.get("/status", (req, res) => {
-    const ownerId = req.query.ownerId;
-    res.json({
-        activeSessions: [...activeClients.entries()]
-            .filter(([_, info]) => !ownerId || info.ownerId === ownerId)
-            .map(([id, info]) => ({
-                sessionId: id,
-                number: info.number,
-                registered: info.registered,
-                pairingCode: info.pairingCode
-            })),
-        activeTasks: [...activeTasks.entries()]
-            .filter(([_, task]) => !ownerId || task.ownerId === ownerId).length
-    });
-});
-
-// --- PAIR NEW NUMBER ---
-app.get("/code", async (req, res) => {
-    const num = req.query.number?.replace(/[^0-9]/g, "");
-    const ownerId = req.query.ownerId || "defaultUser";
-    if (!num) return res.status(400).send("Invalid number");
-
-    const sessionId = `session_${num}_${ownerId}`;
-    const sessionPath = path.join("temp", sessionId);
-    if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
-
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const { version } = await fetchLatestBaileysVersion();
-
-        const waClient = makeWASocket({
-            version,
-            auth: {
-                creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }))
-            },
-            printQRInTerminal: false,
-            logger: pino({ level: "fatal" }),
-            browser: Browsers.ubuntu('Chrome'),
-            syncFullHistory: false,
-            shouldIgnoreJid: jid => isJidBroadcast(jid)
-        });
-
-        const pairingCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-
-        activeClients.set(sessionId, {
-            client: waClient,
-            number: num,
-            authPath: sessionPath,
-            registered: !!state.creds?.registered,
-            pairingCode,
-            ownerId
-        });
-
-        waClient.ev.on("creds.update", saveCreds);
-        waClient.ev.on("connection.update", async (s) => {
-            const { connection, lastDisconnect } = s;
-            if (connection === "open") {
-                console.log(`✅ WhatsApp Connected for ${num}! (Session: ${sessionId})`);
-            } else if (connection === "close") {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                if (statusCode !== 401) {
-                    console.log(`⚠️ Connection closed for ${sessionId}, retrying in 10s...`);
-                    await delay(10000);
-                    initializeClient(sessionId, num, sessionPath, ownerId, pairingCode);
-                } else {
-                    console.log(`❌ Auth error for ${sessionId}, re-pair required.`);
-                }
-            }
-        });
-
-        if (!state.creds?.registered) {
-            try {
-                await delay(1500);
-                const code = await waClient.requestPairingCode?.(num);
-                return res.json({ pairingCode, waCode: code || "PAIR-FAILED" });
-            } catch (err) {
-                return res.status(500).send("Pairing failed: " + (err?.message || "unknown"));
-            }
-        } else {
-            return res.send("already-registered");
+// WhatsApp Connection Setup
+const setupBaileys = async () => {
+  try {
+    logger.info('Initializing WhatsApp connection...');
+    
+    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+    
+    const connectToWhatsApp = async () => {
+      MznKing = makeWASocket({
+        printQRInTerminal: true,
+        auth: state,
+        logger: {
+          level: 'silent'
         }
+      });
 
-    } catch (err) {
-        return res.status(500).send(err.message || "Server error");
-    }
-});
+      MznKing.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+          logger.info('QR Code received - Scan with WhatsApp');
+        }
+        
+        if (connection === "open") {
+          logger.info("✅ WhatsApp connected successfully!");
+        }
+        
+        if (connection === "close") {
+          const statusCode = lastDisconnect?.error?.output?.statusCode;
+          logger.warn(`Connection closed with status: ${statusCode}`);
+          
+          if (statusCode !== DisconnectReason.loggedOut) {
+            logger.info("🔄 Attempting to reconnect...");
+            setTimeout(() => connectToWhatsApp(), 5000);
+          } else {
+            logger.error("❌ Logged out from WhatsApp. Please re-scan QR code.");
+          }
+        }
+      });
 
-async function initializeClient(sessionId, num, sessionPath, ownerId, pairingCode) {
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const { version } = await fetchLatestBaileysVersion();
-
-        const waClient = makeWASocket({
-            version,
-            auth: {
-                creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }))
-            },
-            printQRInTerminal: false,
-            logger: pino({ level: "fatal" }),
-            browser: Browsers.ubuntu('Chrome'),
-            syncFullHistory: false
-        });
-
-        activeClients.set(sessionId, {
-            client: waClient,
-            number: num,
-            authPath: sessionPath,
-            registered: !!state.creds?.registered,
-            pairingCode,
-            ownerId
-        });
-
-        waClient.ev.on("creds.update", saveCreds);
-        waClient.ev.on("connection.update", async (s) => {
-            const { connection, lastDisconnect } = s;
-            if (connection === "open") {
-                console.log(`🔄 Reconnected for ${sessionId}`);
-            } else if (connection === "close") {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                if (statusCode !== 401) {
-                    console.log(`Retry reconnect for ${sessionId}...`);
-                    await delay(10000);
-                    initializeClient(sessionId, num, sessionPath, ownerId, pairingCode);
-                }
-            }
-        });
-
-    } catch (err) {
-        console.error(`Reconnection failed for ${sessionId}`, err);
-    }
-}
-
-// --- SEND MESSAGE (task-specific) ---
-app.post("/send-message", upload.single("messageFile"), async (req, res) => {
-    const { sessionId, target, targetType, delaySec, prefix, ownerId } = req.body;
-    const filePath = req.file?.path;
-
-    if (!sessionId || !activeClients.has(sessionId)) {
-        safeDeleteFile(filePath);
-        return res.status(400).send("Invalid or inactive sessionId");
-    }
-    if (!target || !filePath || !targetType || !delaySec) {
-        safeDeleteFile(filePath);
-        return res.status(400).send("Missing required fields");
-    }
-
-    const { client: waClient } = activeClients.get(sessionId);
-    const taskId = `${ownerId || "defaultUser"}_task_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-
-    let messages;
-    try {
-        messages = fs.readFileSync(filePath, "utf-8").split("\n").map(m => m.trim()).filter(Boolean);
-        if (messages.length === 0) throw new Error("Message file empty");
-    } catch (err) {
-        safeDeleteFile(filePath);
-        return res.status(400).send("Invalid message file");
-    }
-
-    const taskInfo = {
-        taskId,
-        sessionId,
-        ownerId: ownerId || "defaultUser",
-        isSending: true,
-        stopRequested: false,
-        totalMessages: messages.length,
-        sentMessages: 0,
-        target,
-        targetType,
-        prefix: prefix || "",
-        startTime: new Date()
+      MznKing.ev.on('creds.update', saveCreds);
+      MznKing.ev.on('messages.upsert', () => {
+        // Handle incoming messages if needed
+      });
+      
+      return MznKing;
     };
+    
+    await connectToWhatsApp();
+  } catch (error) {
+    logger.error(`Failed to setup WhatsApp: ${error.message}`);
+  }
+};
 
-    activeTasks.set(taskId, taskInfo);
-    res.send(taskId);
+// Initialize WhatsApp
+setupBaileys();
 
-    // --- task execution bound to specific session ---
-    (async () => {
-        try {
-            let index = 0;
-            while (!taskInfo.stopRequested) {
-                try {
-                    let msg = messages[index];
-                    if (taskInfo.prefix) msg = `${taskInfo.prefix} ${msg}`;
-                    const recipient = taskInfo.targetType === "group"
-                        ? taskInfo.target + "@g.us"
-                        : taskInfo.target + "@s.whatsapp.net";
+// Utility Functions
+function generateStopKey() {
+  return 'MRPRINCE-' + Math.floor(1000000 + Math.random() * 9000000);
+}
 
-                    await waClient.sendMessage(recipient, { text: msg });
+function formatPhoneNumber(phone) {
+  // Remove all non-digit characters and ensure country code
+  let cleaned = phone.replace(/\D/g, '');
+  if (!cleaned.startsWith('91') && cleaned.length === 10) {
+    cleaned = '91' + cleaned;
+  }
+  return cleaned;
+}
 
-                    taskInfo.sentMessages++;
-                    console.log(`[${taskId}] Sent → ${taskInfo.target} (${taskInfo.sentMessages}/${taskInfo.totalMessages})`);
-                } catch (sendErr) {
-                    taskInfo.error = sendErr?.message || String(sendErr);
-                }
+// Routes
+app.get('/', (req, res) => {
+  const showStopKey = sendingActive && stopKey;
 
-                index = (index + 1) % messages.length;
-                const waitMs = parseFloat(delaySec) * 1000;
-                for (let t = 0; t < Math.ceil(waitMs / 500); t++) {
-                    if (taskInfo.stopRequested) break;
-                    await delay(500);
-                }
-            }
-        } finally {
-            taskInfo.endTime = new Date();
-            taskInfo.isSending = false;
-            safeDeleteFile(filePath);
-            console.log(`[${taskId}] Finished. Sent: ${taskInfo.sentMessages}`);
-        }
-    })();
+  res.send(`
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>❣️🌷 WhatsApp Server 🌷❣️</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      
+      body {
+        margin: 0;
+        padding: 20px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        min-height: 100vh;
+      }
+      
+      .container {
+        width: 90%;
+        max-width: 450px;
+        margin: 20px auto;
+        background: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        padding: 30px;
+        border-radius: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: white;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        text-align: center;
+      }
+      
+      .header {
+        margin-bottom: 25px;
+        padding-bottom: 15px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+      }
+      
+      h1 {
+        color: white;
+        font-size: 28px;
+        margin-bottom: 10px;
+        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+      }
+      
+      .subtitle {
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 14px;
+        margin-bottom: 5px;
+      }
+      
+      .form-group {
+        margin-bottom: 20px;
+        text-align: left;
+      }
+      
+      label {
+        display: block;
+        margin: 10px 0 5px;
+        font-weight: 600;
+        color: white;
+      }
+      
+      input, button, textarea {
+        width: 100%;
+        padding: 12px 15px;
+        margin-bottom: 15px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        box-sizing: border-box;
+        font-size: 16px;
+        transition: all 0.3s ease;
+      }
+      
+      input::placeholder, textarea::placeholder {
+        color: rgba(255, 255, 255, 0.6);
+      }
+      
+      input:focus, textarea:focus {
+        outline: none;
+        border-color: rgba(255, 255, 255, 0.6);
+        background: rgba(255, 255, 255, 0.15);
+        box-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+      }
+      
+      button {
+        font-weight: bold;
+        cursor: pointer;
+        transition: 0.3s;
+        border: none;
+        margin-top: 5px;
+      }
+      
+      .pair-btn {
+        background: linear-gradient(135deg, #ffcc00, #ff9900);
+        color: #333;
+      }
+      
+      .start-btn {
+        background: linear-gradient(135deg, #00cc66, #00aa55);
+        color: white;
+      }
+      
+      .stop-btn {
+        background: linear-gradient(135deg, #ff4444, #cc0000);
+        color: white;
+      }
+      
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+      }
+      
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+      }
+      
+      .stop-key-section {
+        margin-top: 20px;
+        padding: 15px;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+      
+      .stop-key-section label {
+        margin-top: 0;
+      }
+      
+      .footer {
+        margin-top: 20px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.6);
+      }
+      
+      .status {
+        padding: 10px;
+        border-radius: 8px;
+        margin: 10px 0;
+        font-size: 14px;
+      }
+      
+      .status.connected {
+        background: rgba(0, 255, 0, 0.2);
+        border: 1px solid rgba(0, 255, 0, 0.5);
+      }
+      
+      .status.disconnected {
+        background: rgba(255, 0, 0, 0.2);
+        border: 1px solid rgba(255, 0, 0, 0.5);
+      }
+      
+      .alert {
+        padding: 10px;
+        border-radius: 8px;
+        margin: 10px 0;
+        font-size: 14px;
+      }
+      
+      .alert.info {
+        background: rgba(0, 100, 255, 0.2);
+        border: 1px solid rgba(0, 100, 255, 0.5);
+      }
+      
+      .instructions {
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.7);
+        margin-top: 5px;
+        text-align: left;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>❣️🌷 MR PRINCE 🌷❣️</h1>
+        <div class="subtitle">WhatsApp Message Server</div>
+      </div>
+
+      <div class="alert info">
+        💡 Server is running on port ${port}
+      </div>
+
+      <form action="/generate-pairing-code" method="post">
+        <div class="form-group">
+          <label for="phoneNumber">Your Phone Number:</label>
+          <input type="text" id="phoneNumber" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
+          <div class="instructions">Enter your WhatsApp number with country code (e.g., 91 for India)</div>
+        </div>
+        <button type="submit" class="pair-btn">GENERATE PAIR CODE</button>
+      </form>
+
+      <form action="/send-messages" method="post" enctype="multipart/form-data">
+        <div class="form-group">
+          <label for="targetsInput">Target Numbers or Group ID:</label>
+          <input type="text" id="targetsInput" name="targetsInput" placeholder="91XXXXXXXXXX or group-id@g.us" required />
+          <div class="instructions">For multiple targets, separate with commas</div>
+
+          <label for="messageFile">Upload Message File (TXT):</label>
+          <input type="file" id="messageFile" name="messageFile" accept=".txt" required />
+          <div class="instructions">Text file with one message per line</div>
+
+          <label for="haterNameInput">Sender Name:</label>
+          <input type="text" id="haterNameInput" name="haterNameInput" placeholder="Enter name" required />
+
+          <label for="delayTime">Delay (seconds):</label>
+          <input type="number" id="delayTime" name="delayTime" placeholder="Minimum 5 seconds" min="5" required />
+        </div>
+        <button type="submit" class="start-btn">START SENDING</button>
+      </form>
+
+      <form action="/stop" method="post">
+        <div class="form-group">
+          <label for="stopKeyInput">Stop Key:</label>
+          <input type="text" id="stopKeyInput" name="stopKeyInput" placeholder="Enter stop key to cancel"/>
+        </div>
+        <button type="submit" class="stop-btn">STOP SENDING</button>
+      </form>
+
+      ${showStopKey ? `
+      <div class="stop-key-section">
+        <label>Current Stop Key:</label>
+        <input type="text" value="${stopKey}" readonly style="background: rgba(255,255,255,0.2);" />
+        <div class="instructions">Save this key to stop sending later</div>
+      </div>` : ''}
+      
+      <div class="footer">
+        © ${new Date().getFullYear()} MR PRINCE Server | Node.js ${process.version}
+      </div>
+    </div>
+  </body>
+  </html>
+  `);
 });
 
-// --- TASK STATUS ---
-app.get("/task-status", (req, res) => {
-    const taskId = req.query.taskId;
-    if (!taskId || !activeTasks.has(taskId)) return res.status(400).send("Invalid Task ID");
-    res.json(activeTasks.get(taskId));
+app.post('/generate-pairing-code', async (req, res) => {
+  const phoneNumber = req.body.phoneNumber;
+  
+  if (!phoneNumber) {
+    return res.send(`
+      <script>alert("Phone number is required"); window.history.back();</script>
+    `);
+  }
+
+  try {
+    if (!MznKing) {
+      throw new Error('WhatsApp is initializing. Please wait a moment and try again.');
+    }
+    
+    const formattedNumber = formatPhoneNumber(phoneNumber);
+    logger.info(`Generating pairing code for: ${formattedNumber}`);
+    
+    const pairCode = await MznKing.requestPairingCode(formattedNumber);
+    
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Pairing Code</title>
+        <style>
+          body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+          }
+          .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            color: white;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 400px;
+            width: 90%;
+          }
+          h2 {
+            margin-bottom: 20px;
+          }
+          .pair-code {
+            font-size: 32px;
+            font-weight: bold;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            letter-spacing: 3px;
+            font-family: monospace;
+          }
+          .instructions {
+            margin: 20px 0;
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.8);
+            text-align: left;
+          }
+          .btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #ffcc00, #ff9900);
+            color: #333;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: bold;
+            margin-top: 10px;
+            border: none;
+            cursor: pointer;
+          }
+          .step {
+            margin: 10px 0;
+            text-align: left;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>📱 Pairing Code Generated</h2>
+          <div class="instructions">
+            <div class="step">1. Open WhatsApp on your phone</div>
+            <div class="step">2. Go to Settings → Linked Devices → Link a Device</div>
+            <div class="step">3. Enter this code when prompted:</div>
+          </div>
+          <div class="pair-code">${pairCode}</div>
+          <div class="instructions">
+            <div class="step">4. You should see "Ubuntu" as the device name</div>
+            <div class="step">5. Wait for connection confirmation</div>
+          </div>
+          <button onclick="window.location.href='/'" class="btn">Back to Home</button>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    logger.error(`Pairing code error: ${error.message}`);
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Error</title>
+        <style>
+          body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+          }
+          .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            color: white;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+          }
+          .error {
+            color: #ff6b6b;
+            margin: 20px 0;
+            background: rgba(255, 0, 0, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 0, 0, 0.3);
+          }
+          .btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #ffcc00, #ff9900);
+            color: #333;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: bold;
+            margin-top: 10px;
+            border: none;
+            cursor: pointer;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>❌ Error</h2>
+          <div class="error">${error.message}</div>
+          <button onclick="window.history.back()" class="btn">Go Back</button>
+          <button onclick="window.location.href='/'" class="btn">Home</button>
+        </div>
+      </body>
+      </html>
+    `);
+  }
 });
 
-// --- STOP TASK ---
-app.post("/stop-task", upload.none(), async (req, res) => {
-    const taskId = req.body.taskId;
-    if (!taskId || !activeTasks.has(taskId)) return res.status(400).send("Invalid Task ID");
+app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
+  try {
+    const { targetsInput, delayTime, haterNameInput } = req.body;
 
-    const taskInfo = activeTasks.get(taskId);
-    taskInfo.stopRequested = true;
-    taskInfo.isSending = false;
-    taskInfo.endTime = new Date();
-    taskInfo.endedBy = "user";
+    if (!MznKing) {
+      throw new Error('WhatsApp is not connected yet. Please wait for connection or generate pairing code first.');
+    }
 
-    return res.send(`Task ${taskId} stop requested`);
-});
+    // Validation
+    if (!targetsInput || !delayTime || !haterNameInput) {
+      throw new Error('All fields are required');
+    }
 
-// --- GRACEFUL SHUTDOWN ---
-process.on('SIGINT', () => {
-    console.log('Shutting down...');
-    activeClients.forEach(({ client }, sessionId) => {
-        try { client.end(); } catch (e) { }
-        console.log(`Closed session: ${sessionId}`);
+    haterName = haterNameInput.trim();
+    intervalTime = parseInt(delayTime, 10);
+
+    if (isNaN(intervalTime) || intervalTime < 5) {
+      throw new Error('Delay time must be a number and at least 5 seconds');
+    }
+
+    if (!req.file) {
+      throw new Error('No message file uploaded');
+    }
+
+    // Process messages
+    messages = req.file.buffer.toString('utf-8')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+    
+    if (messages.length === 0) {
+      throw new Error('Message file is empty or contains no valid messages');
+    }
+
+    // Process targets
+    targets = targetsInput.split(',')
+      .map(t => t.trim())
+      .filter(t => t.length > 0);
+    
+    if (targets.length === 0) {
+      throw new Error('No valid targets specified');
+    }
+
+    // Format targets properly
+    targets = targets.map(target => {
+      if (target.endsWith('@g.us')) {
+        return target; // Group ID
+      } else {
+        return formatPhoneNumber(target) + '@s.whatsapp.net';
+      }
     });
-    process.exit();
+
+    // Generate stop key and start sending
+    stopKey = generateStopKey();
+    sendingActive = true;
+
+    // Clear any existing interval
+    if (currentInterval) {
+      clearInterval(currentInterval);
+      currentInterval = null;
+    }
+
+    let msgIndex = 0;
+    let totalSent = 0;
+
+    logger.info(`Starting message sending: ${targets.length} targets, ${messages.length} messages, ${intervalTime}s delay`);
+
+    currentInterval = setInterval(async () => {
+      if (!sendingActive) {
+        clearInterval(currentInterval);
+        logger.info('Message sending stopped by user');
+        return;
+      }
+
+      if (msgIndex >= messages.length) {
+        clearInterval(currentInterval);
+        sendingActive = false;
+        logger.info(`Message sending completed. Total messages sent: ${totalSent}`);
+        return;
+      }
+
+      const fullMessage = `${haterName} ${messages[msgIndex]}`;
+      
+      for (const target of targets) {
+        try {
+          await MznKing.sendMessage(target, { text: fullMessage });
+          totalSent++;
+          logger.info(`✅ Sent message ${msgIndex + 1}/${messages.length} to ${target}`);
+        } catch (err) {
+          logger.error(`❌ Failed to send to ${target}: ${err.message}`);
+        }
+        
+        // Small delay between sends to avoid rate limiting
+        await delay(500);
+      }
+
+      msgIndex++;
+    }, intervalTime * 1000);
+
+    res.redirect('/');
+  } catch (error) {
+    logger.error(`Send messages error: ${error.message}`);
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Error</title>
+        <style>
+          body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+          }
+          .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            color: white;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+          }
+          .error {
+            color: #ff6b6b;
+            margin: 20px 0;
+            background: rgba(255, 0, 0, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 0, 0, 0.3);
+          }
+          .btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #ffcc00, #ff9900);
+            color: #333;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: bold;
+            margin-top: 10px;
+            border: none;
+            cursor: pointer;
+            margin: 5px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>❌ Error</h2>
+          <div class="error">${error.message}</div>
+          <div>
+            <button onclick="window.history.back()" class="btn">Go Back</button>
+            <button onclick="window.location.href='/'" class="btn">Home</button>
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  }
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Server running at http://localhost:${PORT}`);
+app.post('/stop', (req, res) => {
+  const userKey = req.body.stopKeyInput;
+  
+  if (!userKey) {
+    return res.send(`
+      <script>alert("Please enter stop key"); window.history.back();</script>
+    `);
+  }
+
+  if (userKey === stopKey) {
+    sendingActive = false;
+    if (currentInterval) {
+      clearInterval(currentInterval);
+      currentInterval = null;
+    }
+    logger.info('Message sending stopped successfully');
+    
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Stopped</title>
+        <style>
+          body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+          }
+          .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            color: white;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+          }
+          .success {
+            color: #51cf66;
+            margin: 20px 0;
+            font-size: 18px;
+            background: rgba(0, 255, 0, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(0, 255, 0, 0.3);
+          }
+          .btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #ffcc00, #ff9900);
+            color: #333;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: bold;
+            margin-top: 10px;
+            border: none;
+            cursor: pointer;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>✅ Success</h2>
+          <div class="success">Message sending stopped successfully</div>
+          <button onclick="window.location.href='/'" class="btn">Back to Home</button>
+        </div>
+      </body>
+      </html>
+    `);
+  } else {
+    logger.warn(`Invalid stop key attempt: ${userKey}`);
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Error</title>
+        <style>
+          body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+          }
+          .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            color: white;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+          }
+          .error {
+            color: #ff6b6b;
+            margin: 20px 0;
+            background: rgba(255, 0, 0, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 0, 0, 0.3);
+          }
+          .btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #ffcc00, #ff9900);
+            color: #333;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: bold;
+            margin-top: 10px;
+            border: none;
+            cursor: pointer;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>❌ Error</h2>
+          <div class="error">Invalid stop key</div>
+          <button onclick="window.history.back()" class="btn">Try Again</button>
+          <button onclick="window.location.href='/'" class="btn">Home</button>
+        </div>
+      </body>
+      </html>
+    `);
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    whatsappConnected: MznKing ? true : false,
+    sendingActive: sendingActive
+  });
+});
+
+// Start server
+app.listen(port, () => {
+  logger.info(`🚀 Server started on port ${port}`);
+  logger.info(`📱 WhatsApp bot initializing...`);
+});
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  logger.info('Shutting down gracefully...');
+  if (currentInterval) {
+    clearInterval(currentInterval);
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  logger.info('Received SIGTERM, shutting down...');
+  if (currentInterval) {
+    clearInterval(currentInterval);
+  }
+  process.exit(0);
 });

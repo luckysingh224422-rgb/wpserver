@@ -1,26 +1,21 @@
 {
-  "name": "whatsapp-autosender",
+  "name": "whatsapp-server",
   "version": "1.0.0",
-  "description": "WhatsApp Auto Message Sender Bot",
-  "main": "server.js",
+  "description": "WhatsApp Message Server",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "engines": {
-    "node": ">=18.x"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.5.0",
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "pino": "^8.17.1"
+    "express": "^4.18.2",
+    "@whiskeysockets/baileys": "^6.4.0",
+    "multer": "^1.4.5"
   },
-  "keywords": [
-    "whatsapp",
-    "bot",
-    "automation"
-  ],
-  "author": "Your Name",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["whatsapp", "bot", "automation"],
+  "author": "MR PRINCE",
   "license": "MIT"
 }

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>❤️🥀𝐖𝐇𝐀𝐓𝐒𝐀𝐏𝐏 𝐒𝐄𝐑𝐕𝐄𝐑 🥀❤️</title>
+  <style>
+    @keyframes rainbowBG {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: #e0e0ff;
+      text-align: center;
+      min-height: 100vh;
+      background: linear-gradient(270deg, red, orange, yellow, green, blue, indigo, violet);
+      background-size: 1400% 1400%;
+      animation: rainbowBG 15s ease infinite;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 30px;
+      border-radius: 20px;
+      background: rgba(0,0,0,0.1); 
+      border: 3px solid rgba(255,255,255,0.6);
+      box-shadow: 0 0 25px rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+    }
+
+    h1 {
+      color: #fff;
+      text-shadow: 0 0 5px rgba(255,255,255,0.7);
+      margin-top: 0;
+      font-size: 32px;
+    }
+
+    input, select {
+      display: block;
+      margin: 15px auto;
+      padding: 12px;
+      font-size: 16px;
+      width: 90%;
+      max-width: 500px;
+      border-radius: 8px;
+      border: 2px solid white;
+      background: rgba(0,0,0,0.2);
+      color: #fff;
+    }
+
+    button {
+      border: 2px solid white;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+      margin-top: 15px;
+      width: 70%;
+      max-width: 250px;
+      padding: 8px;
+      border-radius: 8px;
+      color: #fff;
+    }
+
+    .btn-pair { background: #FFD700; color: #000; }
+    .btn-start { background: #00c6ff; }
+    .btn-stop { background: #ff512f; }
+
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 12px rgba(255,255,255,0.5);
+    }
+
+    .toggle-buttons {
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+      margin-bottom: 10px;
+    }
+
+    .circle-btn {
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      border: 2px solid white;
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      font-size: 12px;
+      cursor: pointer;
+      transition: 0.3s;
+    }
+
+    .circle-btn.active {
+      background: linear-gradient(to right, #4deeea, #74ee15);
+      color: #0a0a2a;
+      box-shadow: 0 0 8px rgba(77, 238, 234, 0.7);
+    }
+
+    .result-box { 
+      margin-top: 20px;
+      padding: 15px;
+      background: rgba(0,0,0,0.3);
+      border: 2px solid white;
+      border-radius: 10px;
+      font-weight: bold;
+      font-size: 18px;
+      display: none;
+      max-width: 500px; 
+      margin-left: auto;
+      margin-right: auto;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+
+    #pairingResult { color: #FFD700; }
+    #taskResult { color: #00ffcc; }
+    #stopResult { color: #ff6666; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>❤️𝐌𝐑 𝐏𝐑𝐈𝐍𝐂𝐄 ❤️</h1>
+
+    <!-- PAIR FORM -->
+    <form id="pairingForm">
+      <input type="text" id="numberInput" name="number" placeholder="Enter Your WhatsApp Number (with country code)" required>
+      <button type="button" class="btn-pair" onclick="generatePairingCode()">Generate Pairing Code</button>
+    </form>
+    <div id="pairingResult" class="result-box"></div>
+
+    <!-- SESSION SELECTOR -->
+    <select id="sessionSelect" name="sessionId" required>
+      <option value="">-- Select WhatsApp Session --</option>
+    </select>
+
+    <div class="toggle-buttons">
+      <button type="button" id="btnInbox" class="circle-btn active">Inbox</button>
+      <button type="button" id="btnGroup" class="circle-btn">Group</button>
+    </div>
+
+    <!-- MESSAGE FORM -->
+    <form id="messageForm" enctype="multipart/form-data">  
+      <input type="hidden" name="targetType" id="targetType" value="number">  
+      <div id="targetInputBox">
+        <input type="text" name="target" placeholder="Enter Target Number" required>  
+      </div>
+
+      <input type="file" name="messageFile" accept=".txt" required>  
+      <input type="text" name="prefix" placeholder="Enter Message Prefix (optional)">  
+      <input type="number" name="delaySec" placeholder="Delay in Seconds (between messages)" min="1" required>  
+      <button type="submit" class="btn-start">Start Sending</button>  
+    </form>  
+
+    <!-- RESULT BOX FOR TASK -->
+    <div id="taskResult" class="result-box"></div>
+    <div id="stopResult" class="result-box"></div>
+
+    <!-- STOP FORM -->
+    <form id="stopForm">  
+      <input type="text" id="stopTaskId" name="taskId" placeholder="Enter Your Task ID to Stop" required>  
+      <button type="submit" class="btn-stop">Stop Task</button>  
+    </form>  
+  </div>
+
+  <script>
+    if (!localStorage.getItem("ownerId")) {
+      localStorage.setItem("ownerId", "user_" + Math.random().toString(36).substr(2, 6));
+    }
+    const ownerId = localStorage.getItem("ownerId");
+
+    async function loadSessions() {
+      try {
+        const res = await fetch('/status?ownerId=' + ownerId);
+        const data = await res.json();
+        const select = document.getElementById('sessionSelect');
+        select.innerHTML = `<option value="">-- Select WhatsApp Session --</option>`;
+        (data.activeSessions || []).forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.sessionId;
+          opt.textContent = `${s.number} (${s.sessionId})`;
+          select.appendChild(opt);
+        });
+      } catch (err) {
+        console.error("Failed to load sessions", err);
+      }
+    }
+
+    async function generatePairingCode() {
+      const number = document.getElementById('numberInput').value;
+      if (!number) return alert('Please enter a valid WhatsApp number');
+
+      const res = await fetch('/code?number=' + encodeURIComponent(number) + '&ownerId=' + ownerId);
+      const data = await res.json(); // server should return {waCode:"...", pairCode:"..."}
+
+      const pairingDiv = document.getElementById('pairingResult');
+      pairingDiv.innerHTML = `
+        <div>📱 WA Code: <span style="color:#00ffcc">${data.waCode || 'N/A'}</span></div>
+        <div>🔑 Pair Code: <span style="color:#FFD700">${data.pairCode || 'N/A'}</span></div>
+      `;
+      pairingDiv.style.display = 'block';
+
+      setTimeout(loadSessions, 2000);
+    }
+
+    const btnInbox = document.getElementById("btnInbox");
+    const btnGroup = document.getElementById("btnGroup");
+    const targetType = document.getElementById("targetType");
+    const targetInputBox = document.getElementById("targetInputBox");
+
+    btnInbox.addEventListener("click", () => {
+      btnInbox.classList.add("active");
+      btnGroup.classList.remove("active");
+      targetType.value = "number";
+      targetInputBox.innerHTML = `<input type="text" name="target" placeholder="Enter Target Number" required>`;
+    });
+
+    btnGroup.addEventListener("click", () => {
+      btnGroup.classList.add("active");
+      btnInbox.classList.remove("active");
+      targetType.value = "group";
+      targetInputBox.innerHTML = `<input type="text" name="target" placeholder="Enter Group UID" required>`;
+    });
+
+    document.getElementById('messageForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const sessionId = document.getElementById('sessionSelect').value;
+      if (!sessionId) return alert("Please select a WhatsApp session");
+      formData.append("sessionId", sessionId);
+      formData.append("ownerId", ownerId);
+
+      const res = await fetch('/send-message', { method: 'POST', body: formData });
+      const taskId = await res.text();
+      localStorage.setItem('wa_task_id', taskId);
+
+      const taskBox = document.getElementById('taskResult');
+      taskBox.innerHTML = `✅ Task Started! <br> Task ID: <span style="color:#FFD700">${taskId}</span>`;
+      taskBox.style.display = 'block';
+    });
+
+    document.getElementById('stopForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const taskId = document.getElementById('stopTaskId').value || localStorage.getItem('wa_task_id');
+      if (!taskId) return alert("No Task ID provided");
+      const formData = new FormData();
+      formData.append("taskId", taskId);
+      formData.append("ownerId", ownerId);
+
+      await fetch('/stop-task', { method: 'POST', body: formData });
+
+      const stopBox = document.getElementById('stopResult');
+      stopBox.innerHTML = `❌ Successfully Stopped Task <br> Task ID: <span style="color:#FFD700">${taskId}</span>`;
+      stopBox.style.display = 'block';
+    });
+
+    loadSessions();
+  </script>
+</body>
+</html>

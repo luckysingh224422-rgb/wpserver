@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-server",
   "version": "1.0.0",
-  "description": "WhatsApp Message Server",
+  "description": "WhatsApp Message Server by MR PRINCE",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -15,7 +15,12 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["whatsapp", "bot", "automation"],
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "automation",
+    "message-sender"
+  ],
   "author": "MR PRINCE",
   "license": "MIT"
 }
